@@ -72,7 +72,7 @@ string SharedStoreUtils::ToString(const char *input) {
 }
 
 string SharedStoreUtils::ToString(tensorflow::StringPiece input) {
-  return tensorflow::strings::StrCat("\"", utils::CEscape(input.ToString()),
+  return tensorflow::strings::StrCat("\"", utils::CEscape(string(input)),
                                      "\"");
 }
 

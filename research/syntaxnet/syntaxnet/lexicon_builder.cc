@@ -143,7 +143,7 @@ class LexiconBuilder : public OpKernel {
         std::vector<tensorflow::StringPiece> char_sp;
         SegmenterUtils::GetUTF8Chars(word, &char_sp);
         for (const auto &c : char_sp) {
-          const string c_str = c.ToString();
+          const string c_str = string(c);
           if (!c_str.empty() && !HasSpaces(c_str)) chars.Increment(c_str);
         }
 

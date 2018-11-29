@@ -70,7 +70,7 @@ ParserAction HeadLabelTransitionSystem::GetDefaultAction(
 ParserAction HeadLabelTransitionSystem::GetNextGoldAction(
     const ParserState &state) const {
   if (state.EndOfInput()) {
-    LOG(ERROR) << "Oracle called on invalid state: " << state.ToString();
+    LOG(ERROR) << "Oracle called on invalid state: " << string(state);
     return 0;
   }
   const int current = state.Next();

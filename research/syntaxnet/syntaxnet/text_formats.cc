@@ -406,7 +406,7 @@ class SegmentationTrainingDataFormat : public CoNLLSyntaxFormat {
       bool is_first_char = true;
       for (auto utf8char : chars) {
         Token *char_token = sentence->add_token();
-        char_token->set_word(utf8char.ToString());
+        char_token->set_word(string(utf8char));
         char_token->set_start(start);
         start += char_token->word().size();
         char_token->set_end(start - 1);
@@ -521,7 +521,7 @@ class UntokenizedTextFormat : public TokenizedTextFormat {
     int start = 0;
     for (auto utf8char : chars) {
       Token *token = sentence->add_token();
-      token->set_word(utf8char.ToString());
+      token->set_word(string(utf8char));
       token->set_start(start);
       start += utf8char.size();
       token->set_end(start - 1);

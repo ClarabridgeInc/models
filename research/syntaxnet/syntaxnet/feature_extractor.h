@@ -295,7 +295,7 @@ class GenericFeatureFunction {
     }
     tensorflow::StringPiece stripped(output);
     utils::RemoveWhitespaceContext(&stripped);
-    return stripped.ToString();
+    return string(stripped);
   }
 
   // Returns the argument from the feature function descriptor. It defaults to

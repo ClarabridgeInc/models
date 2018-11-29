@@ -127,7 +127,7 @@ void SegmenterUtils::SetCharsAsTokens(
   sentence->set_text(text);
   for (int i = 0; i < chars.size(); ++i) {
     Token *tok = sentence->add_token();
-    tok->set_word(chars[i].ToString());  // NOLINT
+    tok->set_word(string(chars[i]));  // NOLINT
     int start_byte, end_byte;
     GetCharStartEndBytes(text, chars[i], &start_byte, &end_byte);
     tok->set_start(start_byte);

@@ -150,7 +150,7 @@ class GenericFeaturesTest : public ::testing::Test {
     WorkspaceSet workspace;
     extractor_->Preprocess(&workspace, object_.get());
     extractor_->ExtractFeatures(workspace, *object_, focus, &features);
-    EXPECT_EQ(feature_string, features.ToString());
+    EXPECT_EQ(feature_string, string(features));
   }
 
  private:

@@ -120,7 +120,7 @@ string JoinPath(std::initializer_list<tensorflow::StringPiece> paths) {
     }
 
     if (result.empty()) {
-      result = path.ToString();
+      result = string(path);
       continue;
     }
 

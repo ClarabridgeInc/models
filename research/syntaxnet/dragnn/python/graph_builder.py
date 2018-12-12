@@ -717,4 +717,4 @@ class MasterBuilder(object):
                  '\n\t'.join([x.name for x in tf.global_variables()]))
     self.saver = tf.train.Saver(
         var_list=[x for x in tf.global_variables()],
-        write_version=saver_pb2.SaverDef.V1)
+        write_version=saver_pb2.SaverDef.V2)

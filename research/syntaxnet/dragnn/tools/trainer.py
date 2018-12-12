@@ -14,24 +14,25 @@
 # ==============================================================================
 """A program to train a tensorflow neural net parser from a conll file."""
 
-
-
-
 import base64
 import os
 import os.path
 import random
 import time
-from absl import flags
+
+import shutil
 import tensorflow as tf
 
 from tensorflow.python.framework import errors
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.framework import ops
 
 from google.protobuf import text_format
 
 from syntaxnet.ops import gen_parser_ops
+from tensorflow.python.saved_model import tag_constants
+
 from syntaxnet import task_spec_pb2
 from syntaxnet import sentence_pb2
 
@@ -46,6 +47,10 @@ from dragnn.python import trainer_lib
 
 from syntaxnet.util import check
 
+import dragnn.python.load_dragnn_cc_impl
+import syntaxnet.load_parser_ops
+
+flags = tf.app.flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('tf_master', '',
@@ -64,6 +69,10 @@ flags.DEFINE_string('tensorboard_dir', '',
 flags.DEFINE_string('checkpoint_filename', '',
                     'Filename to save the best checkpoint to.')
 
+flags.DEFINE_string('export_dir', '',
+                    'Export directory for the SavedModel format.')
+flags.DEFINE_bool('export_only_mode', False, '')
+
 flags.DEFINE_string('training_corpus_path', '', 'Path to training data.')
 flags.DEFINE_string('tune_corpus_path', '', 'Path to tuning set data.')
 
@@ -74,128 +83,164 @@ flags.DEFINE_integer('batch_size', 4, 'Batch size.')
 flags.DEFINE_integer('report_every', 200,
                      'Report cost and training accuracy every this many steps.')
 flags.DEFINE_integer('job_id', 0, 'The trainer will clear checkpoints if the '
-                     'saved job id is less than the id this flag. If you want '
-                     'training to start over, increment this id.')
+                                  'saved job id is less than the id this flag. If you want '
+                                  'training to start over, increment this id.')
 
 
 def main(unused_argv):
-  logging.set_verbosity(logging.INFO)
-  check.IsTrue(FLAGS.checkpoint_filename)
-  check.IsTrue(FLAGS.tensorboard_dir)
-  check.IsTrue(FLAGS.resource_path)
+    logging.set_verbosity(logging.INFO)
+    check.IsTrue(FLAGS.checkpoint_filename)
+    check.IsTrue(FLAGS.tensorboard_dir)
+    check.IsTrue(FLAGS.resource_path)
 
-  if not gfile.IsDirectory(FLAGS.resource_path):
-    gfile.MakeDirs(FLAGS.resource_path)
+    train_stage = not FLAGS.export_only_mode
 
-  training_corpus_path = gfile.Glob(FLAGS.training_corpus_path)[0]
-  tune_corpus_path = gfile.Glob(FLAGS.tune_corpus_path)[0]
+    if not gfile.IsDirectory(FLAGS.resource_path):
+        gfile.MakeDirs(FLAGS.resource_path)
 
-  # SummaryWriter for TensorBoard
-  tf.logging.info('TensorBoard directory: "%s"', FLAGS.tensorboard_dir)
-  tf.logging.info('Deleting prior data if exists...')
+    if os.path.isdir(FLAGS.export_dir):
+        shutil.rmtree(FLAGS.export_dir)
 
-  stats_file = '%s.stats' % FLAGS.checkpoint_filename
-  try:
-    stats = gfile.GFile(stats_file, 'r').readlines()[0].split(',')
-    stats = [int(x) for x in stats]
-  except errors.OpError:
-    stats = [-1, 0, 0]
+    training_corpus_path = gfile.Glob(FLAGS.training_corpus_path)[0]
+    tune_corpus_path = gfile.Glob(FLAGS.tune_corpus_path)[0]
 
-  tf.logging.info('Read ckpt stats: %s', str(stats))
-  do_restore = True
-  if stats[0] < FLAGS.job_id:
-    do_restore = False
-    tf.logging.info('Deleting last job: %d', stats[0])
+    # SummaryWriter for TensorBoard
+    tf.logging.info('TensorBoard directory: "%s"', FLAGS.tensorboard_dir)
+    tf.logging.info('Deleting prior data if exists...')
+
+    stats_file = '%s.stats' % FLAGS.checkpoint_filename
     try:
-      gfile.DeleteRecursively(FLAGS.tensorboard_dir)
-      gfile.Remove(FLAGS.checkpoint_filename)
-    except errors.OpError as err:
-      tf.logging.error('Unable to delete prior files: %s', err)
-    stats = [FLAGS.job_id, 0, 0]
+        stats = gfile.GFile(stats_file, 'r').readlines()[0].split(',')
+        stats = [int(x) for x in stats]
+    except errors.OpError:
+        stats = [-1, 0, 0]
 
-  tf.logging.info('Creating the directory again...')
-  gfile.MakeDirs(FLAGS.tensorboard_dir)
-  tf.logging.info('Created! Instatiating SummaryWriter...')
-  summary_writer = trainer_lib.get_summary_writer(FLAGS.tensorboard_dir)
-  tf.logging.info('Creating TensorFlow checkpoint dir...')
-  gfile.MakeDirs(os.path.dirname(FLAGS.checkpoint_filename))
+    tf.logging.info('Read ckpt stats: %s', str(stats))
+    do_restore = True
+    if stats[0] < FLAGS.job_id:
+        do_restore = False
+        tf.logging.info('Deleting last job: %d', stats[0])
+        try:
+            gfile.DeleteRecursively(FLAGS.tensorboard_dir)
+            gfile.Remove(FLAGS.checkpoint_filename)
+        except errors.OpError as err:
+            tf.logging.error('Unable to delete prior files: %s', err)
+        stats = [FLAGS.job_id, 0, 0]
 
-  # Constructs lexical resources for SyntaxNet in the given resource path, from
-  # the training data.
-  if FLAGS.compute_lexicon:
-    logging.info('Computing lexicon...')
-    lexicon.build_lexicon(
-        FLAGS.resource_path, training_corpus_path, morph_to_pos=True)
+    tf.logging.info('Creating the directory again...')
+    gfile.MakeDirs(FLAGS.tensorboard_dir)
+    tf.logging.info('Created! Instatiating SummaryWriter...')
+    summary_writer = trainer_lib.get_summary_writer(FLAGS.tensorboard_dir)
+    tf.logging.info('Creating TensorFlow checkpoint dir...')
+    gfile.MakeDirs(os.path.dirname(FLAGS.checkpoint_filename))
 
-  tf.logging.info('Loading MasterSpec...')
-  master_spec = spec_pb2.MasterSpec()
-  with gfile.FastGFile(FLAGS.dragnn_spec, 'r') as fin:
-    text_format.Parse(fin.read(), master_spec)
-  spec_builder.complete_master_spec(master_spec, None, FLAGS.resource_path)
-  logging.info('Constructed master spec: %s', str(master_spec))
-  hyperparam_config = spec_pb2.GridPoint()
+    if train_stage:
+        # Constructs lexical resources for SyntaxNet in the given resource path, from
+        # the training data.
+        if FLAGS.compute_lexicon:
+            logging.info('Computing lexicon...')
+            lexicon.build_lexicon(
+                FLAGS.resource_path, training_corpus_path, morph_to_pos=True)
 
-  # Build the TensorFlow graph.
-  tf.logging.info('Building Graph...')
-  hyperparam_config = spec_pb2.GridPoint()
-  try:
-    text_format.Parse(FLAGS.hyperparams, hyperparam_config)
-  except text_format.ParseError:
-    text_format.Parse(base64.b64decode(FLAGS.hyperparams), hyperparam_config)
-  g = tf.Graph()
-  with g.as_default():
-    builder = graph_builder.MasterBuilder(master_spec, hyperparam_config)
-    component_targets = [
-        spec_pb2.TrainTarget(
-            name=component.name,
-            max_index=idx + 1,
-            unroll_using_oracle=[False] * idx + [True])
-        for idx, component in enumerate(master_spec.component)
-        if 'shift-only' not in component.transition_system.registered_name
-    ]
-    trainers = [
-        builder.add_training_from_config(target) for target in component_targets
-    ]
-    annotator = builder.add_annotation()
-    builder.add_saver()
+    assets = lexicon.create_lexicon_context(FLAGS.resource_path)
 
-  # Read in serialized protos from training data.
-  training_set = ConllSentenceReader(
-      training_corpus_path,
-      projectivize=FLAGS.projectivize_training_set,
-      morph_to_pos=True).corpus()
-  tune_set = ConllSentenceReader(
-      tune_corpus_path, projectivize=False, morph_to_pos=True).corpus()
+    tf.logging.info('Loading MasterSpec...')
+    master_spec = spec_pb2.MasterSpec()
+    with gfile.FastGFile(FLAGS.dragnn_spec, 'r') as fin:
+        text_format.Parse(fin.read(), master_spec)
+    spec_builder.complete_master_spec(master_spec, None, FLAGS.resource_path)
+    logging.info('Constructed master spec: %s', str(master_spec))
+    hyperparam_config = spec_pb2.GridPoint()
 
-  # Ready to train!
-  logging.info('Training on %d sentences.', len(training_set))
-  logging.info('Tuning on %d sentences.', len(tune_set))
+    # Build the TensorFlow graph.
+    tf.logging.info('Building Graph...')
+    hyperparam_config = spec_pb2.GridPoint()
+    try:
+        text_format.Parse(FLAGS.hyperparams, hyperparam_config)
+    except text_format.ParseError:
+        text_format.Parse(base64.b64decode(FLAGS.hyperparams), hyperparam_config)
+    g = tf.Graph()
+    with g.as_default():
+        builder = graph_builder.MasterBuilder(master_spec, hyperparam_config)
+        component_targets = [
+            spec_pb2.TrainTarget(
+                name=component.name,
+                max_index=idx + 1,
+                unroll_using_oracle=[False] * idx + [True])
+            for idx, component in enumerate(master_spec.component)
+            if 'shift-only' not in component.transition_system.registered_name
+        ]
+        trainers = [
+            builder.add_training_from_config(target) for target in component_targets
+        ]
+        annotator = builder.add_annotation()
+        builder.add_saver()
 
-  pretrain_steps = [10000, 0]
-  tagger_steps = 100000
-  train_steps = [tagger_steps, 8 * tagger_steps]
+    saved_model_builder = tf.saved_model.builder.SavedModelBuilder(FLAGS.export_dir)
 
-  with tf.Session(FLAGS.tf_master, graph=g) as sess:
-    # Make sure to re-initialize all underlying state.
-    sess.run(tf.global_variables_initializer())
+    if train_stage:
+        # Read in serialized protos from training data.
+        training_set = ConllSentenceReader(
+            training_corpus_path,
+            projectivize=FLAGS.projectivize_training_set,
+            morph_to_pos=True).corpus()
+        tune_set = ConllSentenceReader(
+            tune_corpus_path, projectivize=False, morph_to_pos=True).corpus()
 
-    if do_restore:
-      tf.logging.info('Restoring from checkpoint...')
-      builder.saver.restore(sess, FLAGS.checkpoint_filename)
+        # Ready to train!
+        logging.info('Training on %d sentences.', len(training_set))
+        logging.info('Tuning on %d sentences.', len(tune_set))
 
-      prev_tagger_steps = stats[1]
-      prev_parser_steps = stats[2]
-      tf.logging.info('adjusting schedule from steps: %d, %d',
-                      prev_tagger_steps, prev_parser_steps)
-      pretrain_steps[0] = max(pretrain_steps[0] - prev_tagger_steps, 0)
-      tf.logging.info('new pretrain steps: %d', pretrain_steps[0])
+        pretrain_steps = [10000, 0]
+        tagger_steps = 100000
+        train_steps = [tagger_steps, 8 * tagger_steps]
 
-    trainer_lib.run_training(
-        sess, trainers, annotator, evaluation.parser_summaries, pretrain_steps,
-        train_steps, training_set, tune_set, tune_set, FLAGS.batch_size,
-        summary_writer, FLAGS.report_every, builder.saver,
-        FLAGS.checkpoint_filename, stats)
+    with tf.Session(FLAGS.tf_master, graph=g) as sess:
+        # Make sure to re-initialize all underlying state.
+        sess.run(tf.global_variables_initializer())
+
+        if do_restore:
+            tf.logging.info('Restoring from checkpoint...')
+            builder.saver.restore(sess, FLAGS.checkpoint_filename)
+
+        if train_stage:
+            prev_tagger_steps = stats[1]
+            prev_parser_steps = stats[2]
+            tf.logging.info('adjusting schedule from steps: %d, %d',
+                            prev_tagger_steps, prev_parser_steps)
+            pretrain_steps[0] = max(pretrain_steps[0] - prev_tagger_steps, 0)
+            tf.logging.info('new pretrain steps: %d', pretrain_steps[0])
+
+            trainer_lib.run_training(
+                sess, trainers, annotator, evaluation.parser_summaries, pretrain_steps,
+                train_steps, training_set, tune_set, tune_set, FLAGS.batch_size,
+                summary_writer, FLAGS.report_every, builder.saver,
+                FLAGS.checkpoint_filename, stats)
+
+        tensor_info_x = tf.saved_model.utils.build_tensor_info(
+            annotator['input_batch'])
+        tensor_info_y = tf.saved_model.utils.build_tensor_info(
+            annotator['annotations'])
+
+        parse_signature = tf.saved_model.signature_def_utils.build_signature_def(
+            inputs={'sentences': tensor_info_x},
+            outputs={'outputs': tensor_info_y})
+
+        for asset in assets.input:
+            tf.add_to_collection(tf.GraphKeys.ASSET_FILEPATHS,
+                                 tf.constant(asset.part[0].file_pattern,
+                                             name=asset.name))
+
+        saved_model_builder.add_meta_graph_and_variables(
+            sess, [tf.saved_model.tag_constants.SERVING],
+            signature_def_map={
+                'parse_sentences': parse_signature,
+            })
+        # assets_collection=ops.get_collection(ops.GraphKeys.ASSET_FILEPATHS))
+        saved_model_builder.save()
+        summary_writer.add_graph(sess.graph)
+
 
 
 if __name__ == '__main__':
-  tf.app.run()
+    tf.app.run()
